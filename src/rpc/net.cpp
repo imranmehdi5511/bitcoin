@@ -185,6 +185,14 @@ static RPCHelpMan getpeerinfo()
         UniValue obj(UniValue::VOBJ);
         CNodeStateStats statestats;
         bool fStateStats = peerman.GetNodeStateStats(stats.nodeid, statestats);
+        // GetNodeStateStats() requires the existence of a CNodeState and a Peer object
+        // to succeed for this peer. These are created at connection initialisation and
+        // exist for the duration of the connection - except if there is a race where the
+        // peer got disconnected in between the GetNodeStats() and the GetNodeStateStats()
+        // calls. In this case, the peer doesn't need to be reported here.
+        if (!fStateStats) {
+            continue;
+        }
         obj.pushKV("id", stats.nodeid);
         obj.pushKV("addr", stats.m_addr_name);
         if (stats.addrBind.IsValid()) {
@@ -731,9 +739,7 @@ static RPCHelpMan setban()
         if (!request.params[2].isNull())
             banTime = request.params[2].getInt<int64_t>();
 
-        bool absolute = false;
-        if (request.params[3].isTrue())
-            absolute = true;
+        const bool absolute{request.params[3].isNull() ? false : request.params[3].get_bool()};
 
         if (isSubnet) {
             node.banman->Ban(subNet, banTime, absolute);
@@ -942,7 +948,7 @@ static RPCHelpMan addpeeraddress()
 
     const std::string& addr_string{request.params[0].get_str()};
     const auto port{request.params[1].getInt<uint16_t>()};
-    const bool tried{request.params[2].isTrue()};
+    const bool tried{request.params[2].isNull() ? false : request.params[2].get_bool()};
 
     UniValue obj(UniValue::VOBJ);
     CNetAddr net_addr;

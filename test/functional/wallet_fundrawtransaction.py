@@ -35,6 +35,9 @@ def get_unspent(listunspent, amount):
     raise AssertionError('Could not find unspent with amount={}'.format(amount))
 
 class RawTransactionsTest(BitcoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.num_nodes = 4
         self.setup_clean_chain = True
@@ -107,6 +110,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.generate(self.nodes[0], 121)
 
         self.test_add_inputs_default_value()
+        self.test_preset_inputs_selection()
         self.test_weight_calculation()
         self.test_change_position()
         self.test_simple()
@@ -795,7 +799,7 @@ class RawTransactionsTest(BitcoinTestFramework):
 
         self.log.info("Test fundrawtxn with invalid estimate_mode settings")
         for k, v in {"number": 42, "object": {"foo": "bar"}}.items():
-            assert_raises_rpc_error(-3, "Expected type string for estimate_mode, got {}".format(k),
+            assert_raises_rpc_error(-3, f"JSON value of type {k} for field estimate_mode is not of expected type string",
                 node.fundrawtransaction, rawtx, {"estimate_mode": v, "conf_target": 0.1, "add_inputs": True})
         for mode in ["", "foo", Decimal("3.141592")]:
             assert_raises_rpc_error(-8, 'Invalid estimate_mode parameter, must be one of: "unset", "economical", "conservative"',
@@ -805,7 +809,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         for mode in ["unset", "economical", "conservative"]:
             self.log.debug("{}".format(mode))
             for k, v in {"string": "", "object": {"foo": "bar"}}.items():
-                assert_raises_rpc_error(-3, "Expected type number for conf_target, got {}".format(k),
+                assert_raises_rpc_error(-3, f"JSON value of type {k} for field conf_target is not of expected type number",
                     node.fundrawtransaction, rawtx, {"estimate_mode": mode, "conf_target": v, "add_inputs": True})
             for n in [-1, 0, 1009]:
                 assert_raises_rpc_error(-8, "Invalid conf_target, must be between 1 and 1008",  # max value of 1008 per src/policy/fees.h
@@ -979,11 +983,13 @@ class RawTransactionsTest(BitcoinTestFramework):
         # are selected, the transaction will end up being too large, so it
         # shouldn't use BnB and instead fall back to Knapsack but that behavior
         # is not implemented yet. For now we just check that we get an error.
+        # First, force the wallet to bulk-generate the addresses we'll need.
+        recipient.keypoolrefill(1500)
         for _ in range(1500):
             outputs[recipient.getnewaddress()] = 0.1
         wallet.sendmany("", outputs)
         self.generate(self.nodes[0], 10)
-        assert_raises_rpc_error(-4, "Transaction too large", recipient.fundrawtransaction, rawtx)
+        assert_raises_rpc_error(-4, "Insufficient funds", recipient.fundrawtransaction, rawtx)
         self.nodes[0].unloadwallet("large")
 
     def test_external_inputs(self):
@@ -1173,7 +1179,6 @@ class RawTransactionsTest(BitcoinTestFramework):
 
         # Case (3), Explicit add_inputs=true and preset inputs (with preset inputs not-covering the target amount)
         options["add_inputs"] = True
-        options["add_to_wallet"] = False
         assert "psbt" in wallet.walletcreatefundedpsbt(outputs=[{addr1: 8}], inputs=inputs, options=options)
 
         # Case (4), Explicit add_inputs=true and preset inputs (with preset inputs covering the target amount)
@@ -1200,6 +1205,50 @@ class RawTransactionsTest(BitcoinTestFramework):
         assert_raises_rpc_error(-4, "Insufficient funds", wallet.walletcreatefundedpsbt, inputs=[], outputs=outputs, options=options)
 
         self.nodes[2].unloadwallet("test_preset_inputs")
+
+    def test_preset_inputs_selection(self):
+        self.log.info('Test wallet preset inputs are not double-counted or reused in coin selection')
+
+        # Create and fund the wallet with 4 UTXO of 5 BTC each (20 BTC total)
+        self.nodes[2].createwallet("test_preset_inputs_selection")
+        wallet = self.nodes[2].get_wallet_rpc("test_preset_inputs_selection")
+        outputs = {}
+        for _ in range(4):
+            outputs[wallet.getnewaddress(address_type="bech32")] = 5
+        self.nodes[0].sendmany("", outputs)
+        self.generate(self.nodes[0], 1)
+
+        # Select the preset inputs
+        coins = wallet.listunspent()
+        preset_inputs = [coins[0], coins[1], coins[2]]
+
+        # Now let's create the tx creation options
+        options = {
+            "inputs": preset_inputs,
+            "add_inputs": True,  # automatically add coins from the wallet to fulfill the target
+            "subtract_fee_from_outputs": [0],  # deduct fee from first output
+            "add_to_wallet": False
+        }
+
+        # Attempt to send 29 BTC from a wallet that only has 20 BTC. The wallet should exclude
+        # the preset inputs from the pool of available coins, realize that there is not enough
+        # money to fund the 29 BTC payment, and fail with "Insufficient funds".
+        #
+        # Even with SFFO, the wallet can only afford to send 20 BTC.
+        # If the wallet does not properly exclude preset inputs from the pool of available coins
+        # prior to coin selection, it may create a transaction that does not fund the full payment
+        # amount or, through SFFO, incorrectly reduce the recipient's amount by the difference
+        # between the original target and the wrongly counted inputs (in this case 9 BTC)
+        # so that the recipient's amount is no longer equal to the user's selected target of 29 BTC.
+
+        # First case, use 'subtract_fee_from_outputs = true'
+        assert_raises_rpc_error(-4, "Insufficient funds", wallet.send, outputs=[{wallet.getnewaddress(address_type="bech32"): 29}], options=options)
+
+        # Second case, don't use 'subtract_fee_from_outputs'
+        del options["subtract_fee_from_outputs"]
+        assert_raises_rpc_error(-4, "Insufficient funds", wallet.send, outputs=[{wallet.getnewaddress(address_type="bech32"): 29}], options=options)
+
+        self.nodes[2].unloadwallet("test_preset_inputs_selection")
 
     def test_weight_calculation(self):
         self.log.info("Test weight calculation with external inputs")

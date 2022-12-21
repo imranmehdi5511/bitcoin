@@ -5,6 +5,7 @@
 #include <policy/rbf.h>
 
 #include <consensus/amount.h>
+#include <kernel/mempool_entry.h>
 #include <policy/feerate.h>
 #include <primitives/transaction.h>
 #include <sync.h>

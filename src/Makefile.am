@@ -134,6 +134,7 @@ BITCOIN_CORE_H = \
   coins.h \
   common/bloom.h \
   common/run_command.h \
+  common/url.h \
   compat/assumptions.h \
   compat/byteswap.h \
   compat/compat.h \
@@ -176,6 +177,7 @@ BITCOIN_CORE_H = \
   kernel/checks.h \
   kernel/coinstats.h \
   kernel/context.h \
+  kernel/mempool_entry.h \
   kernel/mempool_limits.h \
   kernel/mempool_options.h \
   kernel/mempool_persist.h \
@@ -257,7 +259,6 @@ BITCOIN_CORE_H = \
   support/events.h \
   support/lockedpool.h \
   sync.h \
-  threadinterrupt.h \
   threadsafety.h \
   timedata.h \
   torcontrol.h \
@@ -296,6 +297,7 @@ BITCOIN_CORE_H = \
   util/syserror.h \
   util/system.h \
   util/thread.h \
+  util/threadinterrupt.h \
   util/threadnames.h \
   util/time.h \
   util/tokenpipe.h \
@@ -303,7 +305,6 @@ BITCOIN_CORE_H = \
   util/translation.h \
   util/types.h \
   util/ui_change_type.h \
-  util/url.h \
   util/vector.h \
   validation.h \
   validationinterface.h \
@@ -632,6 +633,7 @@ libbitcoin_common_a_SOURCES = \
   chainparams.cpp \
   coins.cpp \
   common/bloom.cpp \
+  common/interfaces.cpp \
   common/run_command.cpp \
   compressor.cpp \
   core_read.cpp \
@@ -662,26 +664,27 @@ libbitcoin_common_a_SOURCES = \
   script/standard.cpp \
   warnings.cpp \
   $(BITCOIN_CORE_H)
+
+if USE_LIBEVENT
+libbitcoin_common_a_CPPFLAGS += $(EVENT_CFLAGS)
+libbitcoin_common_a_SOURCES += common/url.cpp
+endif
 #
 
 # util #
-libbitcoin_util_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(BOOST_CPPFLAGS)
+libbitcoin_util_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
 libbitcoin_util_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libbitcoin_util_a_SOURCES = \
   support/lockedpool.cpp \
   chainparamsbase.cpp \
   clientversion.cpp \
   fs.cpp \
-  interfaces/echo.cpp \
-  interfaces/handler.cpp \
-  interfaces/init.cpp \
   logging.cpp \
   random.cpp \
   randomenv.cpp \
   rpc/request.cpp \
   support/cleanse.cpp \
   sync.cpp \
-  threadinterrupt.cpp \
   util/asmap.cpp \
   util/bip32.cpp \
   util/bytevectorhash.cpp \
@@ -699,6 +702,7 @@ libbitcoin_util_a_SOURCES = \
   util/readwritefile.cpp \
   util/settings.cpp \
   util/thread.cpp \
+  util/threadinterrupt.cpp \
   util/threadnames.cpp \
   util/serfloat.cpp \
   util/spanparsing.cpp \
@@ -708,10 +712,6 @@ libbitcoin_util_a_SOURCES = \
   util/time.cpp \
   util/tokenpipe.cpp \
   $(BITCOIN_CORE_H)
-
-if USE_LIBEVENT
-libbitcoin_util_a_SOURCES += util/url.cpp
-endif
 #
 
 # cli #
@@ -775,6 +775,7 @@ endif
 bitcoin_cli_LDADD = \
   $(LIBBITCOIN_CLI) \
   $(LIBUNIVALUE) \
+  $(LIBBITCOIN_COMMON) \
   $(LIBBITCOIN_UTIL) \
   $(LIBBITCOIN_CRYPTO)
 
@@ -935,7 +936,6 @@ libbitcoinkernel_la_SOURCES = \
   support/cleanse.cpp \
   support/lockedpool.cpp \
   sync.cpp \
-  threadinterrupt.cpp \
   txdb.cpp \
   txmempool.cpp \
   uint256.cpp \

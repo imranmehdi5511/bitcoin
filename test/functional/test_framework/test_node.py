@@ -105,6 +105,9 @@ class TestNode():
             "-debugexclude=rand",
             "-uacomment=testnode%d" % i,
         ]
+        if self.descriptors is None:
+            self.args.append("-disablewallet")
+
         if use_valgrind:
             default_suppressions_file = os.path.join(
                 os.path.dirname(os.path.realpath(__file__)),
@@ -334,7 +337,7 @@ class TestNode():
             return
         self.log.debug("Stopping node")
         try:
-            # Do not use wait argument when testing older nodes, e.g. in feature_backwards_compatibility.py
+            # Do not use wait argument when testing older nodes, e.g. in wallet_backwards_compatibility.py
             if self.version_is_at_least(180000):
                 self.stop(wait=wait)
             else:
@@ -625,6 +628,10 @@ class TestNode():
 
         This method adds the p2p connection to the self.p2ps list and returns
         the connection to the caller.
+
+        p2p_idx must be different for simultaneously connected peers. When reusing it for the next peer
+        after disconnecting the previous one, it is necessary to wait for the disconnect to finish to avoid
+        a race condition.
         """
 
         def addconnection_callback(address, port):
@@ -652,7 +659,8 @@ class TestNode():
         return len([peer for peer in self.getpeerinfo() if peer['subver'] == P2P_SUBVERSION])
 
     def disconnect_p2ps(self):
-        """Close all p2p connections to the node."""
+        """Close all p2p connections to the node.
+        Use only after each p2p has sent a version message to ensure the wait works."""
         for p in self.p2ps:
             p.peer_disconnect()
         del self.p2ps[:]
@@ -715,7 +723,6 @@ class TestNodeCLI():
         """Run bitcoin-cli command. Deserializes returned string as python object."""
         pos_args = [arg_to_cli(arg) for arg in args]
         named_args = [str(key) + "=" + arg_to_cli(value) for (key, value) in kwargs.items()]
-        assert not (pos_args and named_args), "Cannot use positional arguments and named arguments in the same bitcoin-cli call"
         p_args = [self.binary, "-datadir=" + self.datadir] + self.options
         if named_args:
             p_args += ["-named"]

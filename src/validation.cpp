@@ -22,6 +22,7 @@
 #include <flatfile.h>
 #include <fs.h>
 #include <hash.h>
+#include <kernel/mempool_entry.h>
 #include <logging.h>
 #include <logging/timer.h>
 #include <node/blockstorage.h>
@@ -1541,7 +1542,7 @@ bool Chainstate::IsInitialBlockDownload() const
     if (m_chain.Tip()->nChainWork < m_chainman.MinimumChainWork()) {
         return true;
     }
-    if (m_chain.Tip()->Time() < NodeClock::now() - m_chainman.m_options.max_tip_age) {
+    if (m_chain.Tip()->Time() < Now<NodeSeconds>() - m_chainman.m_options.max_tip_age) {
         return true;
     }
     LogPrintf("Leaving InitialBlockDownload (latching to false)\n");
@@ -2079,8 +2080,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // Now that the whole chain is irreversibly beyond that time it is applied to all blocks except the
     // two in the chain that violate it. This prevents exploiting the issue against nodes during their
     // initial block download.
-    bool fEnforceBIP30 = !((pindex->nHeight==91842 && pindex->GetBlockHash() == uint256S("0x00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec")) ||
-                           (pindex->nHeight==91880 && pindex->GetBlockHash() == uint256S("0x00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721")));
+    bool fEnforceBIP30 = !IsBIP30Repeat(*pindex);
 
     // Once BIP34 activated it was not possible to create new duplicate coinbases and thus other than starting
     // with the 2 existing duplicate coinbase pairs, not possible to create overwriting txs.  But by the
@@ -2360,8 +2360,6 @@ bool Chainstate::FlushStateToDisk(
 {
     LOCK(cs_main);
     assert(this->CanFlushToDisk());
-    static std::chrono::microseconds nLastWrite{0};
-    static std::chrono::microseconds nLastFlush{0};
     std::set<int> setFilesToPrune;
     bool full_flush_completed = false;
 
@@ -2415,20 +2413,20 @@ bool Chainstate::FlushStateToDisk(
         }
         const auto nNow = GetTime<std::chrono::microseconds>();
         // Avoid writing/flushing immediately after startup.
-        if (nLastWrite.count() == 0) {
-            nLastWrite = nNow;
+        if (m_last_write.count() == 0) {
+            m_last_write = nNow;
         }
-        if (nLastFlush.count() == 0) {
-            nLastFlush = nNow;
+        if (m_last_flush.count() == 0) {
+            m_last_flush = nNow;
         }
         // The cache is large and we're within 10% and 10 MiB of the limit, but we have time now (not in the middle of a block processing).
         bool fCacheLarge = mode == FlushStateMode::PERIODIC && cache_state >= CoinsCacheSizeState::LARGE;
         // The cache is over the limit, we have to write now.
         bool fCacheCritical = mode == FlushStateMode::IF_NEEDED && cache_state >= CoinsCacheSizeState::CRITICAL;
         // It's been a while since we wrote the block index to disk. Do this frequently, so we don't need to redownload after a crash.
-        bool fPeriodicWrite = mode == FlushStateMode::PERIODIC && nNow > nLastWrite + DATABASE_WRITE_INTERVAL;
+        bool fPeriodicWrite = mode == FlushStateMode::PERIODIC && nNow > m_last_write + DATABASE_WRITE_INTERVAL;
         // It's been very long since we flushed the cache. Do this infrequently, to optimize cache usage.
-        bool fPeriodicFlush = mode == FlushStateMode::PERIODIC && nNow > nLastFlush + DATABASE_FLUSH_INTERVAL;
+        bool fPeriodicFlush = mode == FlushStateMode::PERIODIC && nNow > m_last_flush + DATABASE_FLUSH_INTERVAL;
         // Combine all conditions that result in a full cache flush.
         fDoFullFlush = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicFlush || fFlushForPrune;
         // Write blocks and block index to disk.
@@ -2458,7 +2456,7 @@ bool Chainstate::FlushStateToDisk(
 
                 UnlinkPrunedFiles(setFilesToPrune);
             }
-            nLastWrite = nNow;
+            m_last_write = nNow;
         }
         // Flush best chain related state. This can only be done if the blocks / block index write was also done.
         if (fDoFullFlush && !CoinsTip().GetBestBlock().IsNull()) {
@@ -2476,7 +2474,7 @@ bool Chainstate::FlushStateToDisk(
             // Flush the chainstate (which may refer to block index entries).
             if (!CoinsTip().Flush())
                 return AbortNode(state, "Failed to write to coin database");
-            nLastFlush = nNow;
+            m_last_flush = nNow;
             full_flush_completed = true;
             TRACE5(utxocache, flush,
                    (int64_t)(GetTimeMicros() - nNow.count()), // in microseconds (µs)
@@ -3676,12 +3674,12 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         CBlockIndex* pindexPrev = nullptr;
         BlockMap::iterator mi{m_blockman.m_block_index.find(block.hashPrevBlock)};
         if (mi == m_blockman.m_block_index.end()) {
-            LogPrint(BCLog::VALIDATION, "%s: %s prev block not found\n", __func__, hash.ToString());
+            LogPrint(BCLog::VALIDATION, "header %s has prev block not found: %s\n", hash.ToString(), block.hashPrevBlock.ToString());
             return state.Invalid(BlockValidationResult::BLOCK_MISSING_PREV, "prev-blk-not-found");
         }
         pindexPrev = &((*mi).second);
         if (pindexPrev->nStatus & BLOCK_FAILED_MASK) {
-            LogPrint(BCLog::VALIDATION, "%s: %s prev block invalid\n", __func__, hash.ToString());
+            LogPrint(BCLog::VALIDATION, "header %s has prev block invalid: %s\n", hash.ToString(), block.hashPrevBlock.ToString());
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
         }
         if (!ContextualCheckBlockHeader(block, state, m_blockman, *this, pindexPrev, m_options.adjusted_time_callback())) {
@@ -3722,7 +3720,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                         m_blockman.m_dirty_blockindex.insert(invalid_walk);
                         invalid_walk = invalid_walk->pprev;
                     }
-                    LogPrint(BCLog::VALIDATION, "%s: %s prev block invalid\n", __func__, hash.ToString());
+                    LogPrint(BCLog::VALIDATION, "header %s has prev block invalid: %s\n", hash.ToString(), block.hashPrevBlock.ToString());
                     return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
                 }
             }
@@ -4389,6 +4387,8 @@ void Chainstate::LoadExternalBlockFile(
     try {
         // This takes over fileIn and calls fclose() on it in the CBufferedFile destructor
         CBufferedFile blkdat(fileIn, 2*MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SERIALIZED_SIZE+8, SER_DISK, CLIENT_VERSION);
+        // nRewind indicates where to resume scanning in case something goes wrong,
+        // such as a block fails to deserialize.
         uint64_t nRewind = blkdat.GetPos();
         while (!blkdat.eof()) {
             if (ShutdownRequested()) return;
@@ -4412,28 +4412,30 @@ void Chainstate::LoadExternalBlockFile(
                     continue;
             } catch (const std::exception&) {
                 // no valid block header found; don't complain
+                // (this happens at the end of every blk.dat file)
                 break;
             }
             try {
-                // read block
-                uint64_t nBlockPos = blkdat.GetPos();
+                // read block header
+                const uint64_t nBlockPos{blkdat.GetPos()};
                 if (dbp)
                     dbp->nPos = nBlockPos;
                 blkdat.SetLimit(nBlockPos + nSize);
-                std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
-                CBlock& block = *pblock;
-                blkdat >> block;
-                nRewind = blkdat.GetPos();
-
-                uint256 hash = block.GetHash();
+                CBlockHeader header;
+                blkdat >> header;
+                const uint256 hash{header.GetHash()};
+                // Skip the rest of this block (this may read from disk into memory); position to the marker before the
+                // next block, but it's still possible to rewind to the start of the current block (without a disk read).
+                nRewind = nBlockPos + nSize;
+                blkdat.SkipTo(nRewind);
                 {
                     LOCK(cs_main);
                     // detect out of order blocks, and store them for later
-                    if (hash != params.GetConsensus().hashGenesisBlock && !m_blockman.LookupBlockIndex(block.hashPrevBlock)) {
+                    if (hash != params.GetConsensus().hashGenesisBlock && !m_blockman.LookupBlockIndex(header.hashPrevBlock)) {
                         LogPrint(BCLog::REINDEX, "%s: Out of order block %s, parent %s not known\n", __func__, hash.ToString(),
-                                block.hashPrevBlock.ToString());
+                                 header.hashPrevBlock.ToString());
                         if (dbp && blocks_with_unknown_parent) {
-                            blocks_with_unknown_parent->emplace(block.hashPrevBlock, *dbp);
+                            blocks_with_unknown_parent->emplace(header.hashPrevBlock, *dbp);
                         }
                         continue;
                     }
@@ -4441,13 +4443,19 @@ void Chainstate::LoadExternalBlockFile(
                     // process in case the block isn't known yet
                     const CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
                     if (!pindex || (pindex->nStatus & BLOCK_HAVE_DATA) == 0) {
-                      BlockValidationState state;
-                      if (AcceptBlock(pblock, state, nullptr, true, dbp, nullptr, true)) {
-                          nLoaded++;
-                      }
-                      if (state.IsError()) {
-                          break;
-                      }
+                        // This block can be processed immediately; rewind to its start, read and deserialize it.
+                        blkdat.SetPos(nBlockPos);
+                        std::shared_ptr<CBlock> pblock{std::make_shared<CBlock>()};
+                        blkdat >> *pblock;
+                        nRewind = blkdat.GetPos();
+
+                        BlockValidationState state;
+                        if (AcceptBlock(pblock, state, nullptr, true, dbp, nullptr, true)) {
+                            nLoaded++;
+                        }
+                        if (state.IsError()) {
+                            break;
+                        }
                     } else if (hash != params.GetConsensus().hashGenesisBlock && pindex->nHeight % 1000 == 0) {
                         LogPrint(BCLog::REINDEX, "Block Import: already had block %s at height %d\n", hash.ToString(), pindex->nHeight);
                     }
@@ -5301,4 +5309,16 @@ Chainstate& ChainstateManager::ActivateExistingSnapshot(CTxMemPool* mempool, uin
     LogPrintf("[snapshot] switching active chainstate to %s\n", m_snapshot_chainstate->ToString());
     m_active_chainstate = m_snapshot_chainstate.get();
     return *m_snapshot_chainstate;
+}
+
+bool IsBIP30Repeat(const CBlockIndex& block_index)
+{
+    return (block_index.nHeight==91842 && block_index.GetBlockHash() == uint256S("0x00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec")) ||
+           (block_index.nHeight==91880 && block_index.GetBlockHash() == uint256S("0x00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721"));
+}
+
+bool IsBIP30Unspendable(const CBlockIndex& block_index)
+{
+    return (block_index.nHeight==91722 && block_index.GetBlockHash() == uint256S("0x00000000000271a2dc26e7667f8419f2e15416dc6955e5a6c6cdf3f2574dd08e")) ||
+           (block_index.nHeight==91812 && block_index.GetBlockHash() == uint256S("0x00000000000af0aed4792b1acee3d966af36cf5def14935db8de83d6f9306f2f"));
 }

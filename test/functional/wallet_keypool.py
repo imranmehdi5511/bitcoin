@@ -11,6 +11,9 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
 
 class KeyPoolTest(BitcoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.num_nodes = 1
 
@@ -201,6 +204,9 @@ class KeyPoolTest(BitcoinTestFramework):
         res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00010000}], options={"subtractFeeFromOutputs": [0], "feeRate": 0.00010, "changeAddress": addr.pop()})
         assert_equal("psbt" in res, True)
 
+        if not self.options.descriptors:
+            msg = "Error: Private keys are disabled for this wallet"
+            assert_raises_rpc_error(-4, msg, w2.keypoolrefill, 100)
 
 if __name__ == '__main__':
     KeyPoolTest().main()

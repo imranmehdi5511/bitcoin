@@ -93,6 +93,22 @@ static void RescanWallet(CWallet& wallet, const WalletRescanReserver& reserver, 
     }
 }
 
+static void EnsureBlockDataFromTime(const CWallet& wallet, int64_t timestamp)
+{
+    auto& chain{wallet.chain()};
+    if (!chain.havePruned()) {
+        return;
+    }
+
+    int height{0};
+    const bool found{chain.findFirstBlockWithTimeAndHeight(timestamp - TIMESTAMP_WINDOW, 0, FoundBlock().height(height))};
+
+    uint256 tip_hash{WITH_LOCK(wallet.cs_wallet, return wallet.GetLastBlockHash())};
+    if (found && !chain.hasBlocks(tip_hash, height)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Pruned blocks from height %d required to import keys. Use RPC call getblockchaininfo to determine your pruned height.", height));
+    }
+}
+
 RPCHelpMan importprivkey()
 {
     return RPCHelpMan{"importprivkey",
@@ -184,7 +200,7 @@ RPCHelpMan importprivkey()
 
             // Add the wpkh script for this key if possible
             if (pubkey.IsCompressed()) {
-                pwallet->ImportScripts({GetScriptForDestination(WitnessV0KeyHash(vchAddress))}, 0 /* timestamp */);
+                pwallet->ImportScripts({GetScriptForDestination(WitnessV0KeyHash(vchAddress))}, /*timestamp=*/0);
             }
         }
     }
@@ -273,19 +289,19 @@ RPCHelpMan importaddress()
 
             pwallet->MarkDirty();
 
-            pwallet->ImportScriptPubKeys(strLabel, {GetScriptForDestination(dest)}, false /* have_solving_data */, true /* apply_label */, 1 /* timestamp */);
+            pwallet->ImportScriptPubKeys(strLabel, {GetScriptForDestination(dest)}, /*have_solving_data=*/false, /*apply_label=*/true, /*timestamp=*/1);
         } else if (IsHex(request.params[0].get_str())) {
             std::vector<unsigned char> data(ParseHex(request.params[0].get_str()));
             CScript redeem_script(data.begin(), data.end());
 
             std::set<CScript> scripts = {redeem_script};
-            pwallet->ImportScripts(scripts, 0 /* timestamp */);
+            pwallet->ImportScripts(scripts, /*timestamp=*/0);
 
             if (fP2SH) {
                 scripts.insert(GetScriptForDestination(ScriptHash(redeem_script)));
             }
 
-            pwallet->ImportScriptPubKeys(strLabel, scripts, false /* have_solving_data */, true /* apply_label */, 1 /* timestamp */);
+            pwallet->ImportScriptPubKeys(strLabel, scripts, /*have_solving_data=*/false, /*apply_label=*/true, /*timestamp=*/1);
         } else {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Bitcoin address or script");
         }
@@ -464,9 +480,9 @@ RPCHelpMan importpubkey()
 
         pwallet->MarkDirty();
 
-        pwallet->ImportScriptPubKeys(strLabel, script_pub_keys, true /* have_solving_data */, true /* apply_label */, 1 /* timestamp */);
+        pwallet->ImportScriptPubKeys(strLabel, script_pub_keys, /*have_solving_data=*/true, /*apply_label=*/true, /*timestamp=*/1);
 
-        pwallet->ImportPubKeys({pubKey.GetID()}, {{pubKey.GetID(), pubKey}} , {} /* key_origins */, false /* add_keypool */, false /* internal */, 1 /* timestamp */);
+        pwallet->ImportPubKeys({pubKey.GetID()}, {{pubKey.GetID(), pubKey}} , /*key_origins=*/{}, /*add_keypool=*/false, /*internal=*/false, /*timestamp=*/1);
     }
     if (fRescan)
     {
@@ -503,13 +519,6 @@ RPCHelpMan importwallet()
     if (!pwallet) return UniValue::VNULL;
 
     EnsureLegacyScriptPubKeyMan(*pwallet, true);
-
-    if (pwallet->chain().havePruned()) {
-        // Exit early and print an error.
-        // If a block is pruned after this check, we will import the key(s),
-        // but fail the rescan with a generic error.
-        throw JSONRPCError(RPC_WALLET_ERROR, "Importing wallets is disabled when blocks are pruned");
-    }
 
     WalletRescanReserver reserver(*pwallet);
     if (!reserver.reserve()) {
@@ -565,15 +574,18 @@ RPCHelpMan importwallet()
                         fLabel = true;
                     }
                 }
+                nTimeBegin = std::min(nTimeBegin, nTime);
                 keys.push_back(std::make_tuple(key, nTime, fLabel, strLabel));
             } else if(IsHex(vstr[0])) {
                 std::vector<unsigned char> vData(ParseHex(vstr[0]));
                 CScript script = CScript(vData.begin(), vData.end());
                 int64_t birth_time = ParseISO8601DateTime(vstr[1]);
+                if (birth_time > 0) nTimeBegin = std::min(nTimeBegin, birth_time);
                 scripts.push_back(std::pair<CScript, int64_t>(script, birth_time));
             }
         }
         file.close();
+        EnsureBlockDataFromTime(*pwallet, nTimeBegin);
         // We now know whether we are importing private keys, so we can error if private keys are disabled
         if (keys.size() > 0 && pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
             pwallet->chain().showProgress("", 100, false); // hide progress dialog in GUI
@@ -602,8 +614,6 @@ RPCHelpMan importwallet()
 
             if (has_label)
                 pwallet->SetAddressBook(PKHash(keyid), label, "receive");
-
-            nTimeBegin = std::min(nTimeBegin, time);
             progress++;
         }
         for (const auto& script_pair : scripts) {
@@ -616,16 +626,13 @@ RPCHelpMan importwallet()
                 fGood = false;
                 continue;
             }
-            if (time > 0) {
-                nTimeBegin = std::min(nTimeBegin, time);
-            }
 
             progress++;
         }
         pwallet->chain().showProgress("", 100, false); // hide progress dialog in GUI
     }
     pwallet->chain().showProgress("", 100, false); // hide progress dialog in GUI
-    RescanWallet(*pwallet, reserver, nTimeBegin, false /* update */);
+    RescanWallet(*pwallet, reserver, nTimeBegin, /*update=*/false);
     pwallet->MarkDirty();
 
     if (!fGood)
@@ -1399,7 +1406,7 @@ RPCHelpMan importmulti()
         }
     }
     if (fRescan && fRunScan && requests.size()) {
-        int64_t scannedTime = pwallet->RescanFromTime(nLowestTimestamp, reserver, true /* update */);
+        int64_t scannedTime = pwallet->RescanFromTime(nLowestTimestamp, reserver, /*update=*/true);
         pwallet->ResubmitWalletTransactions(/*relay=*/false, /*force=*/true);
 
         if (pwallet->IsAbortingRescan()) {
@@ -1691,7 +1698,7 @@ RPCHelpMan importdescriptors()
 
     // Rescan the blockchain using the lowest timestamp
     if (rescan) {
-        int64_t scanned_time = pwallet->RescanFromTime(lowest_timestamp, reserver, true /* update */);
+        int64_t scanned_time = pwallet->RescanFromTime(lowest_timestamp, reserver, /*update=*/true);
         pwallet->ResubmitWalletTransactions(/*relay=*/false, /*force=*/true);
 
         if (pwallet->IsAbortingRescan()) {

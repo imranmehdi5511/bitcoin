@@ -9,6 +9,7 @@
 #include <addrman.h>
 #include <banman.h>
 #include <chainparams.h>
+#include <common/url.h>
 #include <consensus/consensus.h>
 #include <consensus/params.h>
 #include <consensus/validation.h>
@@ -16,6 +17,7 @@
 #include <init.h>
 #include <init/common.h>
 #include <interfaces/chain.h>
+#include <kernel/mempool_entry.h>
 #include <net.h>
 #include <net_processing.h>
 #include <node/blockstorage.h>
@@ -46,7 +48,6 @@
 #include <util/threadnames.h>
 #include <util/time.h>
 #include <util/translation.h>
-#include <util/url.h>
 #include <util/vector.h>
 #include <validation.h>
 #include <validationinterface.h>
